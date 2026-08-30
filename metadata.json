@@ -1,0 +1,6 @@
+{
+  "name": "Offline Voice Notes",
+  "description": "Offline speech-to-text notes app with ColorNote-style UI, folder exports, and Whisper model import.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
