@@ -378,6 +378,23 @@ static std::vector<float> computeLogMelSpectrogram(
     return melSpectrogram;
 }
 
+// Multi-key tensor lookups supporting standard GGML, OpenAI Whisper, and GGUF naming variations
+static const GgmlTensor* findTensor(const NativeWhisperContext *ctx, const std::initializer_list<std::string> &names) {
+    if (!ctx) return nullptr;
+    for (const auto &name : names) {
+        auto it = ctx->tensors.find(name);
+        if (it != ctx->tensors.end() && !it->second.dataF32.empty()) {
+            return &it->second;
+        }
+    }
+    return nullptr;
+}
+
+static const float* findTensorData(const NativeWhisperContext *ctx, const std::initializer_list<std::string> &names) {
+    const GgmlTensor *t = findTensor(ctx, names);
+    return t ? t->dataF32.data() : nullptr;
+}
+
 // -------------------------------------------------------------
 // Neural Network Math Operations: LayerNorm, GELU, SIMD MatMul, Softmax
 // -------------------------------------------------------------
@@ -448,6 +465,7 @@ static std::string runWhisperNeuralInference(
     int n_samples
 ) {
     if (!ctx || !ctx->isValid || !ctx->tensorsLoaded || ctx->tensors.empty()) {
+        LOGE("Cannot run Whisper inference: context not valid or no tensors loaded");
         return "";
     }
 
@@ -455,24 +473,25 @@ static std::string runWhisperNeuralInference(
     int n_frames = 0;
     std::vector<float> mel = computeLogMelSpectrogram(ctx, samples, n_samples, n_frames);
     if (mel.empty() || n_frames < 20) {
+        LOGI("Mel spectrogram empty or too short (%d frames)", n_frames);
         return "";
     }
 
-    int d_state = ctx->hparams.n_audio_state; // 384 for tiny, 512 for base
-    int n_heads = ctx->hparams.n_audio_head;  // 6 for tiny, 8 for base
-    int head_dim = d_state / n_heads;
+    int d_state = ctx->hparams.n_audio_state > 0 ? ctx->hparams.n_audio_state : 384;
+    int n_layers = ctx->hparams.n_audio_layer > 0 ? ctx->hparams.n_audio_layer : 4;
 
     // Check if critical encoder tensor weights exist
-    if (ctx->tensors.find("encoder.conv1.weight") == ctx->tensors.end()) {
-        LOGE("Encoder conv1 weight tensor not found");
+    const GgmlTensor *conv1_w = findTensor(ctx, {"encoder.conv_1.weight", "encoder.conv1.weight", "model.encoder.conv1.weight", "conv1.weight", "conv_1.weight"});
+    const float *conv1_b = findTensorData(ctx, {"encoder.conv_1.bias", "encoder.conv1.bias", "model.encoder.conv1.bias", "conv1.bias", "conv_1.bias"});
+    const GgmlTensor *conv2_w = findTensor(ctx, {"encoder.conv_2.weight", "encoder.conv2.weight", "model.encoder.conv2.weight", "conv2.weight", "conv_2.weight"});
+    const float *conv2_b = findTensorData(ctx, {"encoder.conv_2.bias", "encoder.conv2.bias", "model.encoder.conv2.bias", "conv2.bias", "conv_2.bias"});
+
+    if (!conv1_w || !conv2_w) {
+        LOGE("Encoder conv weights not found in loaded model (%zu tensors available)", ctx->tensors.size());
         return "";
     }
 
     // 2. Conv1D Layer 1 (stride 1, kernel size 3) + GELU
-    // conv1.weight is [d_state, 3, 80]
-    const GgmlTensor &conv1_w = ctx->tensors["encoder.conv1.weight"];
-    const float *conv1_b = ctx->tensors.count("encoder.conv1.bias") ? ctx->tensors["encoder.conv1.bias"].dataF32.data() : nullptr;
-
     std::vector<float> conv1_out(d_state * n_frames, 0.0f);
     for (int f = 0; f < n_frames; ++f) {
         for (int d = 0; d < d_state; ++d) {
@@ -481,7 +500,7 @@ static std::string runWhisperNeuralInference(
                 int frame_idx = f + k;
                 if (frame_idx >= 0 && frame_idx < n_frames) {
                     for (int m = 0; m < N_MELS; ++m) {
-                        float w = conv1_w.dataF32[(d * 3 + (k + 1)) * N_MELS + m];
+                        float w = conv1_w->dataF32[(d * 3 + (k + 1)) * N_MELS + m];
                         sum += mel[m * n_frames + frame_idx] * w;
                     }
                 }
@@ -491,10 +510,6 @@ static std::string runWhisperNeuralInference(
     }
 
     // 3. Conv1D Layer 2 (stride 2, kernel size 3) + GELU
-    // conv2.weight is [d_state, 3, d_state]
-    const GgmlTensor &conv2_w = ctx->tensors["encoder.conv2.weight"];
-    const float *conv2_b = ctx->tensors.count("encoder.conv2.bias") ? ctx->tensors["encoder.conv2.bias"].dataF32.data() : nullptr;
-
     int n_audio_frames = (n_frames + 1) / 2;
     std::vector<float> enc_features(d_state * n_audio_frames, 0.0f);
 
@@ -506,7 +521,7 @@ static std::string runWhisperNeuralInference(
                 int frame_idx = src_f + k;
                 if (frame_idx >= 0 && frame_idx < n_frames) {
                     for (int in_d = 0; in_d < d_state; ++in_d) {
-                        float w = conv2_w.dataF32[(d * 3 + (k + 1)) * d_state + in_d];
+                        float w = conv2_w->dataF32[(d * 3 + (k + 1)) * d_state + in_d];
                         sum += conv1_out[in_d * n_frames + frame_idx] * w;
                     }
                 }
@@ -516,8 +531,8 @@ static std::string runWhisperNeuralInference(
     }
 
     // Add Positional Embedding
-    if (ctx->tensors.find("encoder.positional_embedding") != ctx->tensors.end()) {
-        const float *pos = ctx->tensors["encoder.positional_embedding"].dataF32.data();
+    const float *pos = findTensorData(ctx, {"encoder.positional_embedding", "model.encoder.positional_embedding", "encoder.pos_emb"});
+    if (pos) {
         for (int f = 0; f < n_audio_frames && f < ctx->hparams.n_audio_ctx; ++f) {
             for (int d = 0; d < d_state; ++d) {
                 enc_features[f * d_state + d] += pos[f * d_state + d];
@@ -525,50 +540,51 @@ static std::string runWhisperNeuralInference(
         }
     }
 
-    // 4. Transformer Encoder Forward Pass (Layers 0 to n_audio_layer-1)
+    // 4. Transformer Encoder Forward Pass (Layers 0 to n_layers-1)
     std::vector<float> norm_buf(d_state);
     std::vector<float> q_buf(d_state), k_buf(d_state), v_buf(d_state), attn_out(d_state);
     std::vector<float> mlp_buf(d_state * 4), mlp_out(d_state);
 
-    for (int layer = 0; layer < ctx->hparams.n_audio_layer; ++layer) {
+    for (int layer = 0; layer < n_layers; ++layer) {
         std::string prefix = "encoder.blocks." + std::to_string(layer) + ".";
-        if (ctx->tensors.find(prefix + "attn_ln.weight") == ctx->tensors.end()) continue;
 
-        const float *aln_w = ctx->tensors[prefix + "attn_ln.weight"].dataF32.data();
-        const float *aln_b = ctx->tensors.count(prefix + "attn_ln.bias") ? ctx->tensors[prefix + "attn_ln.bias"].dataF32.data() : nullptr;
-        const GgmlTensor &q_w = ctx->tensors[prefix + "attn.query.weight"];
-        const float *q_b = ctx->tensors.count(prefix + "attn.query.bias") ? ctx->tensors[prefix + "attn.query.bias"].dataF32.data() : nullptr;
-        const GgmlTensor &k_w = ctx->tensors[prefix + "attn.key.weight"];
-        const GgmlTensor &v_w = ctx->tensors[prefix + "attn.value.weight"];
-        const float *v_b = ctx->tensors.count(prefix + "attn.value.bias") ? ctx->tensors[prefix + "attn.value.bias"].dataF32.data() : nullptr;
-        const GgmlTensor &out_w = ctx->tensors[prefix + "attn.out.weight"];
-        const float *out_b = ctx->tensors.count(prefix + "attn.out.bias") ? ctx->tensors[prefix + "attn.out.bias"].dataF32.data() : nullptr;
+        const float *aln_w = findTensorData(ctx, {prefix + "attn_ln.weight", prefix + "attn_ln_0.weight", prefix + "self_attn_layer_norm.weight"});
+        const float *aln_b = findTensorData(ctx, {prefix + "attn_ln.bias", prefix + "attn_ln_0.bias", prefix + "self_attn_layer_norm.bias"});
+        const GgmlTensor *q_w = findTensor(ctx, {prefix + "attn.query.weight", prefix + "self_attn.q_proj.weight", prefix + "attn_q.weight"});
+        const float *q_b = findTensorData(ctx, {prefix + "attn.query.bias", prefix + "self_attn.q_proj.bias", prefix + "attn_q.bias"});
+        const GgmlTensor *k_w = findTensor(ctx, {prefix + "attn.key.weight", prefix + "self_attn.k_proj.weight", prefix + "attn_k.weight"});
+        const GgmlTensor *v_w = findTensor(ctx, {prefix + "attn.value.weight", prefix + "self_attn.v_proj.weight", prefix + "attn_v.weight"});
+        const float *v_b = findTensorData(ctx, {prefix + "attn.value.bias", prefix + "self_attn.v_proj.bias", prefix + "attn_v.bias"});
+        const GgmlTensor *out_w = findTensor(ctx, {prefix + "attn.out.weight", prefix + "self_attn.out_proj.weight", prefix + "attn_ln_out.weight"});
+        const float *out_b = findTensorData(ctx, {prefix + "attn.out.bias", prefix + "self_attn.out_proj.bias", prefix + "attn_ln_out.bias"});
 
-        const float *mln_w = ctx->tensors[prefix + "mlp_ln.weight"].dataF32.data();
-        const float *mln_b = ctx->tensors.count(prefix + "mlp_ln.bias") ? ctx->tensors[prefix + "mlp_ln.bias"].dataF32.data() : nullptr;
-        const GgmlTensor &mlp0_w = ctx->tensors[prefix + "mlp.0.weight"];
-        const float *mlp0_b = ctx->tensors.count(prefix + "mlp.0.bias") ? ctx->tensors[prefix + "mlp.0.bias"].dataF32.data() : nullptr;
-        const GgmlTensor &mlp2_w = ctx->tensors[prefix + "mlp.2.weight"];
-        const float *mlp2_b = ctx->tensors.count(prefix + "mlp.2.bias") ? ctx->tensors[prefix + "mlp.2.bias"].dataF32.data() : nullptr;
+        const float *mln_w = findTensorData(ctx, {prefix + "mlp_ln.weight", prefix + "final_layer_norm.weight", prefix + "mlp_ln_0.weight"});
+        const float *mln_b = findTensorData(ctx, {prefix + "mlp_ln.bias", prefix + "final_layer_norm.bias", prefix + "mlp_ln_0.bias"});
+        const GgmlTensor *mlp0_w = findTensor(ctx, {prefix + "mlp.0.weight", prefix + "fc1.weight", prefix + "mlp_0.weight"});
+        const float *mlp0_b = findTensorData(ctx, {prefix + "mlp.0.bias", prefix + "fc1.bias", prefix + "mlp_0.bias"});
+        const GgmlTensor *mlp2_w = findTensor(ctx, {prefix + "mlp.2.weight", prefix + "fc2.weight", prefix + "mlp_1.weight", prefix + "mlp_2.weight"});
+        const float *mlp2_b = findTensorData(ctx, {prefix + "mlp.2.bias", prefix + "fc2.bias", prefix + "mlp_1.bias", prefix + "mlp_2.bias"});
+
+        if (!q_w || !k_w || !v_w || !out_w || !mlp0_w || !mlp2_w) continue;
 
         for (int f = 0; f < n_audio_frames; ++f) {
             float *x = &enc_features[f * d_state];
 
             // Self-Attention LayerNorm & Projection
             layerNorm(x, aln_w, aln_b, norm_buf.data(), d_state);
-            matVecMul(q_w, q_b, norm_buf.data(), q_buf.data(), d_state, d_state);
-            matVecMul(k_w, nullptr, norm_buf.data(), k_buf.data(), d_state, d_state);
-            matVecMul(v_w, v_b, norm_buf.data(), v_buf.data(), d_state, d_state);
-            matVecMul(out_w, out_b, v_buf.data(), attn_out.data(), d_state, d_state);
+            matVecMul(*q_w, q_b, norm_buf.data(), q_buf.data(), d_state, d_state);
+            matVecMul(*k_w, nullptr, norm_buf.data(), k_buf.data(), d_state, d_state);
+            matVecMul(*v_w, v_b, norm_buf.data(), v_buf.data(), d_state, d_state);
+            matVecMul(*out_w, out_b, v_buf.data(), attn_out.data(), d_state, d_state);
 
             // Residual 1
             for (int d = 0; d < d_state; ++d) x[d] += attn_out[d];
 
             // MLP LayerNorm & Feedforward
             layerNorm(x, mln_w, mln_b, norm_buf.data(), d_state);
-            matVecMul(mlp0_w, mlp0_b, norm_buf.data(), mlp_buf.data(), d_state, d_state * 4);
+            matVecMul(*mlp0_w, mlp0_b, norm_buf.data(), mlp_buf.data(), d_state, d_state * 4);
             for (int m = 0; m < d_state * 4; ++m) mlp_buf[m] = gelu(mlp_buf[m]);
-            matVecMul(mlp2_w, mlp2_b, mlp_buf.data(), mlp_out.data(), d_state * 4, d_state);
+            matVecMul(*mlp2_w, mlp2_b, mlp_buf.data(), mlp_out.data(), d_state * 4, d_state);
 
             // Residual 2
             for (int d = 0; d < d_state; ++d) x[d] += mlp_out[d];
@@ -576,9 +592,9 @@ static std::string runWhisperNeuralInference(
     }
 
     // Encoder Post LayerNorm
-    if (ctx->tensors.find("encoder.ln_post.weight") != ctx->tensors.end()) {
-        const float *ln_post_w = ctx->tensors["encoder.ln_post.weight"].dataF32.data();
-        const float *ln_post_b = ctx->tensors.count("encoder.ln_post.bias") ? ctx->tensors["encoder.ln_post.bias"].dataF32.data() : nullptr;
+    const float *ln_post_w = findTensorData(ctx, {"encoder.ln_post.weight", "model.encoder.ln_post.weight", "encoder.ln.weight"});
+    const float *ln_post_b = findTensorData(ctx, {"encoder.ln_post.bias", "model.encoder.ln_post.bias", "encoder.ln.bias"});
+    if (ln_post_w) {
         for (int f = 0; f < n_audio_frames; ++f) {
             layerNorm(&enc_features[f * d_state], ln_post_w, ln_post_b, &enc_features[f * d_state], d_state);
         }
@@ -589,9 +605,14 @@ static std::string runWhisperNeuralInference(
     std::vector<int32_t> tokens = {50258, 50259, 50359, 50363};
     std::string resultText = "";
 
-    const GgmlTensor &tok_emb = ctx->tensors["decoder.token_embedding"];
-    const GgmlTensor &dec_ln_w = ctx->tensors["decoder.ln.weight"];
-    const float *dec_ln_b = ctx->tensors.count("decoder.ln.bias") ? ctx->tensors["decoder.ln.bias"].dataF32.data() : nullptr;
+    const GgmlTensor *tok_emb = findTensor(ctx, {"decoder.token_embedding", "decoder.token_embedding.weight", "model.decoder.token_embedding", "decoder.tokens.weight", "decoder.token_embeddings.weight"});
+    const GgmlTensor *dec_ln_w = findTensor(ctx, {"decoder.ln.weight", "decoder.ln_post.weight", "model.decoder.ln.weight", "decoder.ln_0.weight"});
+    const float *dec_ln_b = findTensorData(ctx, {"decoder.ln.bias", "decoder.ln_post.bias", "model.decoder.ln.bias", "decoder.ln_0.bias"});
+
+    if (!tok_emb) {
+        LOGE("Decoder token embedding tensor not found");
+        return "";
+    }
 
     int max_decode_steps = 40;
     for (int step = 0; step < max_decode_steps; ++step) {
@@ -600,8 +621,8 @@ static std::string runWhisperNeuralInference(
 
         // Get token embedding
         std::vector<float> dec_state(d_state, 0.0f);
-        if ((cur_tok * d_state + d_state) <= (int)tok_emb.dataF32.size()) {
-            const float *emb_ptr = &tok_emb.dataF32[cur_tok * d_state];
+        if ((cur_tok * d_state + d_state) <= (int)tok_emb->dataF32.size()) {
+            const float *emb_ptr = &tok_emb->dataF32[cur_tok * d_state];
             std::memcpy(dec_state.data(), emb_ptr, d_state * sizeof(float));
         }
 
@@ -619,17 +640,18 @@ static std::string runWhisperNeuralInference(
         }
 
         // Final Decoder LayerNorm
-        layerNorm(dec_state.data(), dec_ln_w.dataF32.data(), dec_ln_b, norm_buf.data(), d_state);
+        const float *ln_w_ptr = dec_ln_w ? dec_ln_w->dataF32.data() : nullptr;
+        layerNorm(dec_state.data(), ln_w_ptr, dec_ln_b, norm_buf.data(), d_state);
 
         // Project onto vocabulary logits (using token embedding matrix transpose with SIMD vectorization)
         int best_token = 50257;
         float max_logit = -1e9f;
 
         // Scan vocab tokens (1 to 50256)
-        int vocab_limit = std::min(ctx->hparams.n_vocab, (int)tok_emb.dataF32.size() / d_state);
+        int vocab_limit = std::min(ctx->hparams.n_vocab, (int)tok_emb->dataF32.size() / d_state);
         for (int v = 1; v < vocab_limit && v < 50257; ++v) {
             float logit = 0.0f;
-            const float *w_v = &tok_emb.dataF32[v * d_state];
+            const float *w_v = &tok_emb->dataF32[v * d_state];
 
 #if USE_ARM_NEON
             float32x4_t vsum = vdupq_n_f32(0.0f);
@@ -669,6 +691,7 @@ static std::string runWhisperNeuralInference(
         }
     }
 
+    LOGI("Whisper forward pass decoded %zu tokens: '%s'", tokens.size() - 4, resultText.c_str());
     return resultText;
 }
 

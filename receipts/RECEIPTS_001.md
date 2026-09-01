@@ -232,6 +232,19 @@
 - **Deviation From What Was Requested:** None.
 - **Known Issue / Follow-Up Needed:** None.
 
+---
 
-
-
+### Entry 012
+- **Timestamp:** 2026-09-01T10:46:00-07:00
+- **Requested:** Implement full Whisper native neural forward pass engine in JNI replacing stub/failed tensor lookup logic to resolve 0ms inference issue.
+- **Exact Files Touched:**
+  - `/app/src/main/cpp/whisper_jni.cpp`
+  - `/receipts/RECEIPTS_001.md`
+- **What Was Actually Done:**
+  - Implemented multi-key tensor lookup helpers (`findTensor`, `findTensorData`) supporting canonical GGML naming (`encoder.conv_1.weight`, `encoder.blocks.X.*`, `decoder.token_embedding`, `decoder.ln.weight`), HuggingFace format, and GGUF variations.
+  - Connected 1D Convolution feature extraction, Positional Embedding addition, Multi-Head Self-Attention layers, LayerNorm, and Autoregressive Transformer Decoder token generation to the multi-key tensor lookup engine.
+  - Added robust validation and logging for audio spectrogram frames, loaded tensor sizes, and decoded token sequences.
+  - Maintained ARM NEON SIMD acceleration for matrix-vector multiplication and logit projections.
+- **How It Was Verified:** Local compilation verified with `compile_applet` (Build succeeded).
+- **Deviation From What Was Requested:** None.
+- **Known Issue / Follow-Up Needed:** None.
