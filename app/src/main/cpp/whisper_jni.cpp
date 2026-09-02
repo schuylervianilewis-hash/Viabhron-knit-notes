@@ -806,21 +806,30 @@ Java_com_example_audio_whisper_WhisperNative_initContext(
             LOGI("Loaded hyperparameters: n_vocab=%d, n_audio_layer=%d, n_text_layer=%d, n_mels=%d",
                  ctx->hparams.n_vocab, ctx->hparams.n_audio_layer, ctx->hparams.n_text_layer, ctx->hparams.n_mels);
 
-            // In standard GGML format for whisper.cpp:
-            // Hyperparameters are:
-            // int32_t n_vocab;
-            // int32_t n_audio_ctx;
-            // int32_t n_audio_state;
-            // int32_t n_audio_head;
-            // int32_t n_audio_layer;
-            // int32_t n_text_ctx;
-            // int32_t n_text_state;
-            // int32_t n_text_head;
-            // int32_t n_text_layer;
-            // int32_t n_mels;
-            // int32_t ftype;
-            
-            // Read vocabulary tokens
+            // In whisper.cpp GGML binary format:
+            // 1. Hyperparameters (read above)
+            // 2. Mel filters:
+            //    int32_t filters.n_mel;
+            //    int32_t filters.n_fft;
+            //    float filters.data[n_mel * n_fft];
+            int32_t mel_n_mel = 0;
+            int32_t mel_n_fft = 0;
+            file.read(reinterpret_cast<char*>(&mel_n_mel), sizeof(mel_n_mel));
+            file.read(reinterpret_cast<char*>(&mel_n_fft), sizeof(mel_n_fft));
+
+            if (mel_n_mel > 0 && mel_n_mel <= 128 && mel_n_fft > 0 && mel_n_fft <= 4096) {
+                size_t numFilterFloats = static_cast<size_t>(mel_n_mel) * mel_n_fft;
+                ctx->melFilters.resize(numFilterFloats);
+                file.read(reinterpret_cast<char*>(ctx->melFilters.data()), numFilterFloats * sizeof(float));
+                LOGI("Loaded Mel filter bank: %d mels x %d fft (%zu floats, %zu bytes)",
+                     mel_n_mel, mel_n_fft, numFilterFloats, numFilterFloats * sizeof(float));
+            } else {
+                LOGI("No custom Mel filter bank header detected or skipped (n_mel=%d, n_fft=%d)", mel_n_mel, mel_n_fft);
+                // Rewind 8 bytes in case this binary variant didn't have filter bank
+                file.seekg(-8, std::ios::cur);
+            }
+
+            // 3. Read vocabulary tokens
             int n_vocab = ctx->hparams.n_vocab;
             if (n_vocab <= 0 || n_vocab > 100000) n_vocab = 51865;
             ctx->vocabulary.resize(n_vocab);
