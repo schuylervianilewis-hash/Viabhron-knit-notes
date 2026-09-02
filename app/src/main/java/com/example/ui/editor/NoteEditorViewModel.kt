@@ -145,21 +145,25 @@ class NoteEditorViewModel(application: Application) : AndroidViewModel(applicati
                     }
                     appendTranscribedText(transcriptionResult.text)
 
-                    // Hold the green recognized state for 1.8s so the user clearly sees confirmation
-                    kotlinx.coroutines.delay(1800L)
-                    _uiState.update {
-                        it.copy(
-                            speechStatus = if (currentAmplitude.value > 0.08f) SpeechRecognitionStatus.HEARING_SOUND else SpeechRecognitionStatus.IDLE_SILENCE
-                        )
+                    // Launch status reset in an independent coroutine so it doesn't block incoming chunks!
+                    viewModelScope.launch {
+                        kotlinx.coroutines.delay(1800L)
+                        _uiState.update {
+                            it.copy(
+                                speechStatus = if (currentAmplitude.value > 0.08f) SpeechRecognitionStatus.HEARING_SOUND else SpeechRecognitionStatus.IDLE_SILENCE
+                            )
+                        }
                     }
                 } else if (currentAmplitude.value > 0.15f) {
                     // Audio was loud enough but no words were deciphered
                     _uiState.update { it.copy(speechStatus = SpeechRecognitionStatus.NO_WORDS_DETECTED) }
-                    kotlinx.coroutines.delay(1000L)
-                    _uiState.update {
-                        it.copy(
-                            speechStatus = if (currentAmplitude.value > 0.08f) SpeechRecognitionStatus.HEARING_SOUND else SpeechRecognitionStatus.IDLE_SILENCE
-                        )
+                    viewModelScope.launch {
+                        kotlinx.coroutines.delay(1000L)
+                        _uiState.update {
+                            it.copy(
+                                speechStatus = if (currentAmplitude.value > 0.08f) SpeechRecognitionStatus.HEARING_SOUND else SpeechRecognitionStatus.IDLE_SILENCE
+                            )
+                        }
                     }
                 }
             }

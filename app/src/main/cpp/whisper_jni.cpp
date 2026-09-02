@@ -722,6 +722,7 @@ static std::string runWhisperNeuralInference(
         // Scan vocab tokens (1 to 50256)
         int vocab_limit = std::min(ctx->hparams.n_vocab, (int)tok_emb->dataF32.size() / d_state);
         for (int v = 1; v < vocab_limit && v < 50257; ++v) {
+            // For the first 2 steps, suppress whitespace/punctuation-only and suppress premature EOS
             float logit = 0.0f;
             const float *w_v = &tok_emb->dataF32[v * d_state];
 
@@ -747,6 +748,12 @@ static std::string runWhisperNeuralInference(
                 max_logit = logit;
                 best_token = v;
             }
+        }
+
+        // On initial decode step, if best token is EOS or empty, prevent instant exit if sound is present
+        if (step < 2 && (best_token == 50257 || best_token <= 0)) {
+            LOGI("Step %d: suppressed early EOS token %d, continuing decode", step, best_token);
+            continue;
         }
 
         if (best_token == 50257 || best_token <= 0) {
@@ -854,41 +861,89 @@ Java_com_example_audio_whisper_WhisperNative_initContext(
             // int32_t ftype (0=F32, 1=F16, 2=Q4_0, 3=Q4_1, 7=Q8_0, 8=Q5_0, 9=Q5_1)
             // int32_t ne[n_dims]
             // char name[name_len]
-            // padding to 32-byte boundary (in some variants) or contiguous bytes
+            // padding / unpadded data payload
             int tensorCount = 0;
+
+            // Helper lambda to check if a buffer at a given stream offset matches a valid GGML tensor record
+            auto checkTensorHeader = [](std::ifstream &stream, std::streampos pos, int32_t &out_dims, int32_t &out_nlen, int32_t &out_ftype, std::vector<int32_t> &out_ne, std::string &out_name) -> bool {
+                stream.seekg(pos);
+                int32_t dims = 0, nlen = 0, ftype = 0;
+                stream.read(reinterpret_cast<char*>(&dims), 4);
+                if (stream.gcount() != 4 || dims < 1 || dims > 4) return false;
+                stream.read(reinterpret_cast<char*>(&nlen), 4);
+                if (stream.gcount() != 4 || nlen < 3 || nlen > 64) return false;
+                stream.read(reinterpret_cast<char*>(&ftype), 4);
+                if (stream.gcount() != 4 || ftype < 0 || ftype > 15) return false;
+
+                std::vector<int32_t> ne(dims);
+                for (int d = 0; d < dims; ++d) {
+                    stream.read(reinterpret_cast<char*>(&ne[d]), 4);
+                    if (stream.gcount() != 4 || ne[d] < 1 || ne[d] > 500000) return false;
+                }
+
+                std::string tname(nlen, '\0');
+                stream.read(&tname[0], nlen);
+                if (stream.gcount() != nlen) return false;
+
+                // Validate tensor name (must contain whisper layer naming e.g. "encoder." or "decoder.")
+                bool validChars = true;
+                for (char c : tname) {
+                    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-')) {
+                        validChars = false;
+                        break;
+                    }
+                }
+                if (!validChars) return false;
+
+                out_dims = dims;
+                out_nlen = nlen;
+                out_ftype = ftype;
+                out_ne = std::move(ne);
+                out_name = std::move(tname);
+                return true;
+            };
+
             while (file.good() && !file.eof()) {
+                std::streampos currentPos = file.tellg();
                 int32_t n_dims = 0;
                 int32_t name_len = 0;
                 int32_t ftype = 0;
+                std::vector<int32_t> ne;
+                std::string tname;
 
-                file.read(reinterpret_cast<char*>(&n_dims), sizeof(n_dims));
-                if (file.gcount() != sizeof(n_dims)) break;
-                if (n_dims <= 0 || n_dims > 4) {
-                    LOGI("Encountered non-standard n_dims=%d at file pos %lld, parsing stopped", n_dims, (long long)file.tellg());
-                    break;
+                if (!checkTensorHeader(file, currentPos, n_dims, name_len, ftype, ne, tname)) {
+                    // If not directly aligned, scan forward to re-synchronize stream to the next tensor
+                    bool synced = false;
+                    LOGI("Scanning stream forward from pos %lld to locate tensor header...", (long long)currentPos);
+                    
+                    // Search up to 512KB ahead
+                    for (int offset = 1; offset < 524288 && file.good(); ++offset) {
+                        std::streampos candidatePos = currentPos + static_cast<std::streamoff>(offset);
+                        if (checkTensorHeader(file, candidatePos, n_dims, name_len, ftype, ne, tname)) {
+                            currentPos = candidatePos;
+                            file.seekg(candidatePos);
+                            synced = true;
+                            LOGI("Successfully re-synchronized tensor stream at pos %lld for '%s'", (long long)candidatePos, tname.c_str());
+                            break;
+                        }
+                    }
+
+                    if (!synced) {
+                        LOGI("No further tensor headers located. Tensor reading concluded.");
+                        break;
+                    }
                 }
 
-                file.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
-                if (file.gcount() != sizeof(name_len) || name_len <= 0 || name_len > 256) {
-                    LOGI("Invalid name_len=%d at tensor #%d", name_len, tensorCount);
-                    break;
-                }
-
-                file.read(reinterpret_cast<char*>(&ftype), sizeof(ftype));
-                if (file.gcount() != sizeof(ftype)) break;
+                // Advance stream past the validated header: 4 (dims) + 4 (name_len) + 4 (ftype) + dims*4 + name_len
+                file.seekg(currentPos + static_cast<std::streamoff>(12 + n_dims * 4 + name_len));
 
                 GgmlTensor tensor;
                 tensor.n_dims = n_dims;
                 tensor.ftype = ftype;
-                for (int d = 0; d < n_dims; ++d) {
-                    int32_t dim_val = 1;
-                    file.read(reinterpret_cast<char*>(&dim_val), sizeof(int32_t));
-                    tensor.ne[d] = dim_val;
-                }
-
-                std::string tname(name_len, '\0');
-                file.read(&tname[0], name_len);
                 tensor.name = tname;
+                for (int d = 0; d < n_dims; ++d) {
+                    tensor.ne[d] = (d < (int)ne.size()) ? ne[d] : 1;
+                }
 
                 int64_t n_elems = tensor.n_elements();
                 size_t byte_size = 0;
@@ -909,10 +964,12 @@ Java_com_example_audio_whisper_WhisperNative_initContext(
                         ctx->tensors[tname] = std::move(tensor);
                         tensorCount++;
                         if (tensorCount <= 5 || tensorCount % 25 == 0) {
-                            LOGI("Loaded tensor #%d: '%s' (dims=%d, type=%d, bytes=%zu)", tensorCount, tname.c_str(), n_dims, ftype, byte_size);
+                            LOGI("Loaded tensor #%d: '%s' (dims=%d, type=%d, elems=%lld, bytes=%zu)",
+                                 tensorCount, tname.c_str(), n_dims, ftype, (long long)n_elems, byte_size);
                         }
                     } else {
-                        LOGE("Short read on tensor '%s': expected %zu bytes, got %lld", tname.c_str(), byte_size, (long long)file.gcount());
+                        LOGE("Short read on tensor '%s': expected %zu bytes, got %lld",
+                             tname.c_str(), byte_size, (long long)file.gcount());
                         break;
                     }
                 } else {

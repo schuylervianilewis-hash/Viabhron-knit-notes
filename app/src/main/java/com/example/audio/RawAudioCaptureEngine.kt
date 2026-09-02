@@ -239,7 +239,8 @@ class RawAudioCaptureEngine(
                                         _audioChunks.tryEmit(chunk)
                                         chunkCount++
                                         speechSamplesCount = 0
-                                        speechDetectedInUtterance = false
+                                        // Retain speechDetectedInUtterance = true so the trailing silence/pause 
+                                        // boundary can still flush the remainder of the sentence!
                                     }
                                 } else {
                                     // In silence: feed 200ms pre-roll sliding buffer
