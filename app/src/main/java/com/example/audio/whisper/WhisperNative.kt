@@ -1,6 +1,9 @@
 package com.example.audio.whisper
 
 import android.util.Log
+import com.example.data.logkeeper.LogKeeperManager
+import com.example.data.logkeeper.LogLevel
+import com.example.data.logkeeper.LogTag
 
 /**
  * Kotlin JNI bridge to the native C/C++ Whisper GGML inference engine (whisper.cpp).
@@ -16,6 +19,19 @@ object WhisperNative {
         } catch (_: Throwable) {
             isLibraryLoaded = false
         }
+    }
+
+    /**
+     * Called directly from C++ JNI to route all native engine logs into LogKeeper audit.
+     */
+    @JvmStatic
+    fun onNativeLog(levelStr: String, message: String) {
+        val level = when (levelStr.uppercase()) {
+            "ERROR", "ERR" -> LogLevel.ERROR
+            "WARN", "WARNING" -> LogLevel.WARN
+            else -> LogLevel.INFO
+        }
+        LogKeeperManager.log(LogTag.VoiceEngine, "[Native C++] $message", level)
     }
 
     fun isNativeAvailable(): Boolean = isLibraryLoaded
@@ -57,3 +73,4 @@ object WhisperNative {
      */
     external fun freeContext(contextHandle: Long)
 }
+

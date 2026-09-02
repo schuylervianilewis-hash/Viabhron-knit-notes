@@ -69,11 +69,15 @@ class WhisperModelDecoder(private val context: Context) {
      * Decodes 16kHz float PCM samples into transcribed text tokens.
      */
     fun decode(samples: FloatArray, mel: MelSpectrogram, rawRms: Float): String {
-        if (rawRms < 0.005f) return ""
+        if (rawRms < 0.005f) {
+            LogKeeperManager.log(LogTag.VoiceEngine, "Decode skipped: RMS ($rawRms) below silence threshold 0.005")
+            return ""
+        }
 
         // 1. If native GGML context is active, run native whisper_full JNI
         if (nativeContextHandle != 0L) {
             try {
+                LogKeeperManager.log(LogTag.VoiceEngine, "Dispatching ${samples.size} samples to native GGML context (handle: $nativeContextHandle)...")
                 val nativeText = WhisperNative.fullTranscribe(
                     nativeContextHandle,
                     samples,
@@ -83,10 +87,14 @@ class WhisperModelDecoder(private val context: Context) {
                 if (nativeText.isNotBlank()) {
                     LogKeeperManager.log(LogTag.VoiceEngine, "Whisper Native decoded: '${nativeText.trim()}'")
                     return nativeText.trim()
+                } else {
+                    LogKeeperManager.log(LogTag.VoiceEngine, "Whisper Native returned empty transcription for chunk (RMS: $rawRms)")
                 }
             } catch (e: Throwable) {
                 LogKeeperManager.log(LogTag.VoiceEngine, "Native transcribe error: ${e.message}")
             }
+        } else {
+            LogKeeperManager.log(LogTag.VoiceEngine, "No active nativeContextHandle (0L) during decode")
         }
 
         // 2. If TFLite interpreter is active

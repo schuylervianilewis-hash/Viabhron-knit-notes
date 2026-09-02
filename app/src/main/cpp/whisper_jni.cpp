@@ -20,8 +20,80 @@
 #endif
 
 #define TAG "WhisperJNI"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+static JavaVM *g_jvm = nullptr;
+static jclass g_whisperNativeClass = nullptr;
+static jmethodID g_onNativeLogMethod = nullptr;
+
+static void sendLogToKotlin(const char *level, const std::string &msg) {
+    if (!g_jvm) return;
+    JNIEnv *env = nullptr;
+    bool attached = false;
+    jint res = g_jvm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+    if (res == JNI_EDETACHED) {
+        if (g_jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+            attached = true;
+        } else {
+            return;
+        }
+    }
+    if (env && g_whisperNativeClass && g_onNativeLogMethod) {
+        jstring jLevel = env->NewStringUTF(level);
+        jstring jMsg = env->NewStringUTF(msg.c_str());
+        env->CallStaticVoidMethod(g_whisperNativeClass, g_onNativeLogMethod, jLevel, jMsg);
+        env->DeleteLocalRef(jLevel);
+        env->DeleteLocalRef(jMsg);
+    }
+    if (attached) {
+        g_jvm->DetachCurrentThread();
+    }
+}
+
+static void logNative(const char *level, const char *fmt, ...) {
+    char buffer[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+
+    if (strcmp(level, "ERROR") == 0) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", buffer);
+    } else {
+        __android_log_print(ANDROID_LOG_INFO, TAG, "%s", buffer);
+    }
+
+    sendLogToKotlin(level, buffer);
+}
+
+#define LOGI(...) logNative("INFO", __VA_ARGS__)
+#define LOGE(...) logNative("ERROR", __VA_ARGS__)
+
+JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void * /* reserved */) {
+    g_jvm = vm;
+    JNIEnv *env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK) {
+        return JNI_ERR;
+    }
+    jclass localClass = env->FindClass("com/example/audio/whisper/WhisperNative");
+    if (localClass) {
+        g_whisperNativeClass = reinterpret_cast<jclass>(env->NewGlobalRef(localClass));
+        g_onNativeLogMethod = env->GetStaticMethodID(g_whisperNativeClass, "onNativeLog", "(Ljava/lang/String;Ljava/lang/String;)V");
+    }
+    return JNI_VERSION_1_6;
+}
+
+JNIEXPORT void JNI_OnUnload(JavaVM *vm, void * /* reserved */) {
+    JNIEnv *env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) == JNI_OK) {
+        if (g_whisperNativeClass) {
+            env->DeleteGlobalRef(g_whisperNativeClass);
+            g_whisperNativeClass = nullptr;
+            g_onNativeLogMethod = nullptr;
+        }
+    }
+    g_jvm = nullptr;
+}
+
 
 static const int SAMPLE_RATE = 16000;
 static const int N_FFT = 400;
@@ -678,6 +750,13 @@ static std::string runWhisperNeuralInference(
         }
 
         if (best_token == 50257 || best_token <= 0) {
+            LOGI("Decoding ended at step %d on stop token %d", step, best_token);
+            break;
+        }
+
+        // Prevent infinite loop on the same token
+        if (tokens.size() > 2 && tokens.back() == best_token && tokens[tokens.size() - 2] == best_token) {
+            LOGI("Decoding broken at step %d due to repetition of token %d", step, best_token);
             break;
         }
 
@@ -691,7 +770,7 @@ static std::string runWhisperNeuralInference(
         }
     }
 
-    LOGI("Whisper forward pass decoded %zu tokens: '%s'", tokens.size() - 4, resultText.c_str());
+    LOGI("Whisper forward pass completed (%zu tokens generated): '%s'", tokens.size() > 4 ? tokens.size() - 4 : 0, resultText.c_str());
     return resultText;
 }
 
@@ -832,8 +911,11 @@ Java_com_example_audio_whisper_WhisperNative_fullTranscribe(
     }
     double rms = std::sqrt(sumSq / numSamples);
 
-    // Suppress pure silence and ambient background hiss (< 0.5% RMS or < 1.0% peak)
-    if (rms < 0.005 || maxAmp < 0.010) {
+    LOGI("fullTranscribe called: %d samples, RMS=%.5f, maxAmp=%.5f", numSamples, (float)rms, (float)maxAmp);
+
+    // Suppress pure silence and ambient background hiss (< 0.2% RMS or < 0.5% peak)
+    if (rms < 0.002 || maxAmp < 0.005) {
+        LOGI("Audio suppressed by VAD noise gate (RMS=%.5f < 0.002, peak=%.5f < 0.005)", (float)rms, (float)maxAmp);
         env->ReleaseFloatArrayElements(audioSamples, samples, JNI_ABORT);
         return env->NewStringUTF("");
     }

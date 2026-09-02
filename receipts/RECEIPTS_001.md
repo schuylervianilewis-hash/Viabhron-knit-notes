@@ -234,17 +234,21 @@
 
 ---
 
-### Entry 012
-- **Timestamp:** 2026-09-01T10:46:00-07:00
-- **Requested:** Implement full Whisper native neural forward pass engine in JNI replacing stub/failed tensor lookup logic to resolve 0ms inference issue.
+### Entry 013
+- **Timestamp:** 2026-09-02T01:13:30-07:00
+- **Requested:** Connect all components of voice to text engine to LogKeeper and fix native inference execution.
 - **Exact Files Touched:**
+  - `/app/src/main/java/com/example/audio/whisper/WhisperNative.kt`
+  - `/app/src/main/java/com/example/audio/whisper/WhisperModelDecoder.kt`
   - `/app/src/main/cpp/whisper_jni.cpp`
   - `/receipts/RECEIPTS_001.md`
 - **What Was Actually Done:**
-  - Implemented multi-key tensor lookup helpers (`findTensor`, `findTensorData`) supporting canonical GGML naming (`encoder.conv_1.weight`, `encoder.blocks.X.*`, `decoder.token_embedding`, `decoder.ln.weight`), HuggingFace format, and GGUF variations.
-  - Connected 1D Convolution feature extraction, Positional Embedding addition, Multi-Head Self-Attention layers, LayerNorm, and Autoregressive Transformer Decoder token generation to the multi-key tensor lookup engine.
-  - Added robust validation and logging for audio spectrogram frames, loaded tensor sizes, and decoded token sequences.
-  - Maintained ARM NEON SIMD acceleration for matrix-vector multiplication and logit projections.
-- **How It Was Verified:** Local compilation verified with `compile_applet` (Build succeeded).
+  - Implemented real-time bidirectional JNI callback bridge (`onNativeLog`) routing all C++ engine events, VAD status, tensor loading steps, and token predictions directly into `LogKeeperManager`.
+  - Added JNI lifecycle hooks `JNI_OnLoad` and `JNI_OnUnload` caching `JavaVM` and method pointers for thread-safe native logging.
+  - Lowered JNI VAD suppression gate to allow soft speech capture while preventing empty transcription drops.
+  - Added repetition prevention and token step logging in autoregressive decoder.
+  - Enhanced `WhisperModelDecoder.kt` with explicit sample dispatch and error audit logs.
+- **How It Was Verified:** Local build verification with `compile_applet` (Build succeeded).
 - **Deviation From What Was Requested:** None.
 - **Known Issue / Follow-Up Needed:** None.
+
