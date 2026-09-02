@@ -806,20 +806,47 @@ Java_com_example_audio_whisper_WhisperNative_initContext(
             LOGI("Loaded hyperparameters: n_vocab=%d, n_audio_layer=%d, n_text_layer=%d, n_mels=%d",
                  ctx->hparams.n_vocab, ctx->hparams.n_audio_layer, ctx->hparams.n_text_layer, ctx->hparams.n_mels);
 
+            // In standard GGML format for whisper.cpp:
+            // Hyperparameters are:
+            // int32_t n_vocab;
+            // int32_t n_audio_ctx;
+            // int32_t n_audio_state;
+            // int32_t n_audio_head;
+            // int32_t n_audio_layer;
+            // int32_t n_text_ctx;
+            // int32_t n_text_state;
+            // int32_t n_text_head;
+            // int32_t n_text_layer;
+            // int32_t n_mels;
+            // int32_t ftype;
+            
             // Read vocabulary tokens
-            int maxTokensToRead = std::min(ctx->hparams.n_vocab, 51865);
-            ctx->vocabulary.resize(maxTokensToRead);
-            for (int i = 0; i < maxTokensToRead && file.good(); ++i) {
-                int32_t len = 0;
+            int n_vocab = ctx->hparams.n_vocab;
+            if (n_vocab <= 0 || n_vocab > 100000) n_vocab = 51865;
+            ctx->vocabulary.resize(n_vocab);
+
+            LOGI("Reading %d vocabulary entries from GGML binary...", n_vocab);
+            for (int i = 0; i < n_vocab && file.good(); ++i) {
+                uint32_t len = 0;
                 file.read(reinterpret_cast<char*>(&len), sizeof(len));
-                if (len > 0 && len < 256) {
+                if (file.gcount() != sizeof(len)) break;
+                if (len > 0 && len < 1024) {
                     std::string word(len, '\0');
                     file.read(&word[0], len);
                     ctx->vocabulary[i] = cleanBpeToken(word);
                 }
             }
+            LOGI("Vocabulary read complete (%zu tokens loaded)", ctx->vocabulary.size());
 
-            // Read Tensor Weights
+            // Read Tensor Weights until EOF
+            // Standard GGML tensor record:
+            // int32_t n_dims (1..4)
+            // int32_t name_len
+            // int32_t ftype (0=F32, 1=F16, 2=Q4_0, 3=Q4_1, 7=Q8_0, 8=Q5_0, 9=Q5_1)
+            // int32_t ne[n_dims]
+            // char name[name_len]
+            // padding to 32-byte boundary (in some variants) or contiguous bytes
+            int tensorCount = 0;
             while (file.good() && !file.eof()) {
                 int32_t n_dims = 0;
                 int32_t name_len = 0;
@@ -827,15 +854,27 @@ Java_com_example_audio_whisper_WhisperNative_initContext(
 
                 file.read(reinterpret_cast<char*>(&n_dims), sizeof(n_dims));
                 if (file.gcount() != sizeof(n_dims)) break;
+                if (n_dims <= 0 || n_dims > 4) {
+                    LOGI("Encountered non-standard n_dims=%d at file pos %lld, parsing stopped", n_dims, (long long)file.tellg());
+                    break;
+                }
+
                 file.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
-                if (name_len <= 0 || name_len > 256) break;
+                if (file.gcount() != sizeof(name_len) || name_len <= 0 || name_len > 256) {
+                    LOGI("Invalid name_len=%d at tensor #%d", name_len, tensorCount);
+                    break;
+                }
+
                 file.read(reinterpret_cast<char*>(&ftype), sizeof(ftype));
+                if (file.gcount() != sizeof(ftype)) break;
 
                 GgmlTensor tensor;
                 tensor.n_dims = n_dims;
                 tensor.ftype = ftype;
                 for (int d = 0; d < n_dims; ++d) {
-                    file.read(reinterpret_cast<char*>(&tensor.ne[d]), sizeof(int32_t));
+                    int32_t dim_val = 1;
+                    file.read(reinterpret_cast<char*>(&dim_val), sizeof(int32_t));
+                    tensor.ne[d] = dim_val;
                 }
 
                 std::string tname(name_len, '\0');
@@ -853,18 +892,28 @@ Java_com_example_audio_whisper_WhisperNative_initContext(
                 else if (ftype == GGML_TYPE_Q8_0) byte_size = (n_elems / 32) * 34;
                 else byte_size = n_elems * 4;
 
-                if (byte_size > 0 && byte_size < 100000000) {
+                if (byte_size > 0 && byte_size < 150000000) {
                     tensor.data.resize(byte_size);
                     file.read(reinterpret_cast<char*>(tensor.data.data()), byte_size);
-                    tensor.dequantizeToF32();
-                    ctx->tensors[tname] = std::move(tensor);
+                    if (file.gcount() == (std::streamsize)byte_size) {
+                        tensor.dequantizeToF32();
+                        ctx->tensors[tname] = std::move(tensor);
+                        tensorCount++;
+                        if (tensorCount <= 5 || tensorCount % 25 == 0) {
+                            LOGI("Loaded tensor #%d: '%s' (dims=%d, type=%d, bytes=%zu)", tensorCount, tname.c_str(), n_dims, ftype, byte_size);
+                        }
+                    } else {
+                        LOGE("Short read on tensor '%s': expected %zu bytes, got %lld", tname.c_str(), byte_size, (long long)file.gcount());
+                        break;
+                    }
                 } else {
+                    LOGE("Abnormal byte_size %zu for tensor '%s', seeking cur", byte_size, tname.c_str());
                     file.seekg(byte_size, std::ios::cur);
                 }
             }
 
             ctx->tensorsLoaded = !ctx->tensors.empty();
-            ctx->isValid = true;
+            ctx->isValid = ctx->tensorsLoaded;
             LOGI("Successfully loaded %zu tensor matrices into memory", ctx->tensors.size());
         }
         file.close();
