@@ -190,38 +190,148 @@ fun ModelManagerScreen(
                 }
             }
 
-            // Import Action Button
-            item(key = "import_action_section") {
-                Button(
-                    onClick = {
-                        modelPickerLauncher.launch(
-                            arrayOf(
-                                "application/octet-stream",
-                                "application/x-binary",
-                                "*/*"
-                            )
-                        )
-                    },
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00897B)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(52.dp)
-                        .testTag("btn_import_model_file")
+            // Engine Selection & Import Action
+            item(key = "engine_selection_section") {
+                var selectedEngineTab by remember { mutableStateOf(0) } // 0: Whisper (.bin/.gguf), 1: Sherpa-ONNX (.onnx/.zip)
+
+                Card(
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.FileUpload,
-                        contentDescription = null,
-                        modifier = Modifier.size(22.dp)
-                    )
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Text(
-                        text = "Import Whisper Model File (.bin / .gguf)",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Speech-to-Text Engine Selection",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
                         )
-                    )
+                        Text(
+                            text = "Choose 1 active engine type to import and transcribe notes:",
+                            style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFF64748B))
+                        )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            // Option 1: Whisper C++ Native
+                            Card(
+                                shape = RoundedCornerShape(8.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (selectedEngineTab == 0) Color(0xFFE0F2F1) else Color(0xFFF1F5F9)
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { selectedEngineTab = 0 }
+                                    .then(
+                                        if (selectedEngineTab == 0) Modifier.border(1.5.dp, Color(0xFF00897B), RoundedCornerShape(8.dp))
+                                        else Modifier
+                                    )
+                                    .padding(8.dp)
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth().padding(4.dp)) {
+                                    Icon(
+                                        imageVector = if (selectedEngineTab == 0) Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
+                                        contentDescription = null,
+                                        tint = if (selectedEngineTab == 0) Color(0xFF00897B) else Color(0xFF94A3B8),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Whisper GGML",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                        color = if (selectedEngineTab == 0) Color(0xFF00695C) else Color(0xFF334155)
+                                    )
+                                    Text(
+                                        text = ".bin / .gguf",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, color = Color(0xFF64748B))
+                                    )
+                                }
+                            }
+
+                            // Option 2: Sherpa-ONNX / FUTO Style
+                            Card(
+                                shape = RoundedCornerShape(8.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (selectedEngineTab == 1) Color(0xFFEDE9FE) else Color(0xFFF1F5F9)
+                                ),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { selectedEngineTab = 1 }
+                                    .then(
+                                        if (selectedEngineTab == 1) Modifier.border(1.5.dp, Color(0xFF7C3AED), RoundedCornerShape(8.dp))
+                                        else Modifier
+                                    )
+                                    .padding(8.dp)
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth().padding(4.dp)) {
+                                    Icon(
+                                        imageVector = if (selectedEngineTab == 1) Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
+                                        contentDescription = null,
+                                        tint = if (selectedEngineTab == 1) Color(0xFF7C3AED) else Color(0xFF94A3B8),
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = "Sherpa-ONNX",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                        color = if (selectedEngineTab == 1) Color(0xFF6D28D9) else Color(0xFF334155)
+                                    )
+                                    Text(
+                                        text = ".onnx / FUTO",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp, color = Color(0xFF64748B))
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
+                        Button(
+                            onClick = {
+                                if (selectedEngineTab == 0) {
+                                    modelPickerLauncher.launch(
+                                        arrayOf(
+                                            "application/octet-stream",
+                                            "application/x-binary",
+                                            "*/*"
+                                        )
+                                    )
+                                } else {
+                                    modelPickerLauncher.launch(
+                                        arrayOf(
+                                            "application/zip",
+                                            "application/octet-stream",
+                                            "*/*"
+                                        )
+                                    )
+                                }
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (selectedEngineTab == 0) Color(0xFF00897B) else Color(0xFF7C3AED)
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("btn_import_model_file")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FileUpload,
+                                contentDescription = null,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (selectedEngineTab == 0) "Import Whisper Model (.bin / .gguf)" else "Import Sherpa-ONNX / FUTO (.onnx / .zip)",
+                                style = MaterialTheme.typography.titleMedium.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp
+                                )
+                            )
+                        }
+                    }
                 }
             }
 

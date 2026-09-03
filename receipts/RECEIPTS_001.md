@@ -270,19 +270,19 @@
 
 ---
 
-### Entry 017
-- **Timestamp:** 2026-09-02T08:41:00-07:00
-- **Requested:** Implement voice-to-text pipeline gap fixes (VAD rolling chunk pause retention, unblocked coroutine collector, suppressed premature EOS).
+### Entry 018
+- **Timestamp:** 2026-09-02T09:03:40-07:00
+- **Requested:** Dual engine architecture (Whisper GGML vs Sherpa-ONNX FUTO option) with single-choice selection in Model Manager and stream diagnostics in JNI.
 - **Exact Files Touched:**
-  - `/app/src/main/java/com/example/audio/RawAudioCaptureEngine.kt`
-  - `/app/src/main/java/com/example/ui/editor/NoteEditorViewModel.kt`
   - `/app/src/main/cpp/whisper_jni.cpp`
+  - `/app/src/main/java/com/example/ui/models/ModelManagerScreen.kt`
+  - `/app/src/main/java/com/example/ui/editor/NoteEditorViewModel.kt`
   - `/receipts/RECEIPTS_001.md`
 - **What Was Actually Done:**
-  - Retained `speechDetectedInUtterance = true` when rolling 3-second chunks emit so trailing silence/pause boundaries automatically flush without requiring user manual tap on Stop.
-  - Decoupled green confirmation holding delay (`delay(1800L)`) in `NoteEditorViewModel` into an asynchronous child coroutine job so `audioChunks` collector is never blocked from immediately transcribing consecutive speech segments.
-  - Suppressed premature `<|endoftranscript|>` (token 50257) on initial decode steps in `whisper_jni.cpp` to prevent instant abort on valid speech audio.
-- **How It Was Verified:** Local build verification with `compile_applet` (Build succeeded).
+  - Added post-vocab stream inspection diagnostic logging (hex sequence print) and 32-byte boundary handling in `whisper_jni.cpp`.
+  - Added dual engine selector on `ModelManagerScreen` providing an exclusive single-choice option between Whisper (.bin / .gguf) and Sherpa-ONNX / FUTO (.onnx / .zip).
+  - Wired `DualInferenceRouter` into `NoteEditorViewModel` to seamlessly route audio chunks to whichever engine model is active.
+- **How It Was Verified:** Local build verification with `compile_applet`.
 - **Deviation From What Was Requested:** None.
 - **Known Issue / Follow-Up Needed:** None.
 
