@@ -20,19 +20,27 @@ sealed interface WhisperEngineState {
 class WhisperInferenceEngine(private val context: Context) {
 
     private var activeModel: ModelInfoEntity? = null
+    @Volatile
     private var isLoaded: Boolean = false
+    @Volatile
+    private var isLoading: Boolean = false
     private val modelDecoder = WhisperModelDecoder(context)
 
     suspend fun loadModel(model: ModelInfoEntity): Boolean = withContext(Dispatchers.IO) {
         if (isLoaded && activeModel?.filePath == model.filePath) {
             return@withContext true
         }
+        if (isLoading) {
+            return@withContext false
+        }
 
         try {
+            isLoading = true
             val file = File(model.filePath)
             if (!file.exists() || file.length() == 0L) {
                 val err = "Model file does not exist on disk: ${model.filePath}"
                 LogKeeperManager.log(LogTag.VoiceEngine, err)
+                isLoading = false
                 return@withContext false
             }
 
@@ -40,6 +48,7 @@ class WhisperInferenceEngine(private val context: Context) {
             activeModel = model
             modelDecoder.load(model.filePath)
             isLoaded = true
+            isLoading = false
             val loadDuration = System.currentTimeMillis() - startTime
 
             LogKeeperManager.log(
@@ -51,11 +60,21 @@ class WhisperInferenceEngine(private val context: Context) {
             val err = "Failed to load Whisper model: ${e.message}"
             LogKeeperManager.log(LogTag.VoiceEngine, err)
             isLoaded = false
+            isLoading = false
             false
         }
     }
 
     suspend fun transcribeChunk(chunk: AudioChunk): TranscriptionResult = withContext(Dispatchers.Default) {
+        if (!isLoaded || isLoading) {
+            return@withContext TranscriptionResult(
+                chunkId = chunk.id,
+                text = "",
+                processingDurationMs = 0L,
+                confidence = 0f,
+                isFinal = true
+            )
+        }
         val overallStart = System.currentTimeMillis()
 
         // 1. Phase 1: Mel-Spectrogram Extraction & FFT

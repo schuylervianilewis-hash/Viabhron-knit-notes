@@ -72,7 +72,6 @@ class NoteEditorViewModel(application: Application) : AndroidViewModel(applicati
     private val audioCaptureEngine = RawAudioCaptureEngine(application, viewModelScope)
     private val speechRecognizerEngine = AndroidSpeechRecognizerEngine(application)
     private val whisperInferenceEngine = WhisperInferenceEngine(application)
-    private val dualInferenceRouter = com.example.audio.backend.DualInferenceRouter(application, whisperInferenceEngine)
 
     private val enabledReplacements: StateFlow<List<WordReplacementEntity>> =
         wordReplacementDao.getEnabledReplacementsFlow()
@@ -128,15 +127,15 @@ class NoteEditorViewModel(application: Application) : AndroidViewModel(applicati
             }
         }
 
-        // Collect emitted audio chunks and run dual offline inference pipeline (Whisper or Sherpa-ONNX)
+        // Collect emitted audio chunks and run offline Whisper inference pipeline
         viewModelScope.launch {
             audioCaptureEngine.audioChunks.collect { chunk ->
                 val activeModel = modelDao.getActiveModel().firstOrNull()
                 if (activeModel != null) {
-                    dualInferenceRouter.loadModel(activeModel)
+                    whisperInferenceEngine.loadModel(activeModel)
                 }
 
-                val transcriptionResult = dualInferenceRouter.transcribeChunk(chunk)
+                val transcriptionResult = whisperInferenceEngine.transcribeChunk(chunk)
                 if (transcriptionResult.text.isNotBlank()) {
                     _uiState.update {
                         it.copy(

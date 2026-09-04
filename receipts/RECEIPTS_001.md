@@ -286,6 +286,28 @@
 - **Deviation From What Was Requested:** None.
 - **Known Issue / Follow-Up Needed:** None.
 
+---
+
+### Entry 019
+- **Timestamp:** 2026-09-04T07:25:20-07:00
+- **Requested:** Option A execution: remove dual interface and all Sherpa-ONNX stub references; use only Whisper engine connected to LogKeeper; streamline import model flow.
+- **Exact Files Touched:**
+  - `/app/src/main/java/com/example/audio/backend/DualInferenceBackend.kt` (deleted)
+  - `/app/src/main/java/com/example/ui/models/ModelManagerScreen.kt`
+  - `/app/src/main/java/com/example/ui/editor/NoteEditorViewModel.kt`
+  - `/app/src/main/java/com/example/audio/whisper/WhisperInferenceEngine.kt`
+  - `/receipts/RECEIPTS_001.md`
+- **What Was Actually Done:**
+  - Deleted stub file `DualInferenceBackend.kt`.
+  - Reverted `ModelManagerScreen.kt` from dual-tab engine selection to a clean, direct single-action "Import Whisper Model File (.bin / .gguf)" button.
+  - Removed `DualInferenceRouter` dependency from `NoteEditorViewModel.kt` and wired audio chunks directly into `WhisperInferenceEngine`.
+  - Added volatile thread-safe loading lock (`isLoading` / `isLoaded`) in `WhisperInferenceEngine.kt` to prevent transcription attempts and race conditions during model initialization.
+  - Preserved bidirectional JNI callback bridge routing all native engine events and warnings into `LogKeeperManager`.
+- **How It Was Verified:** Local build verification with `compile_applet` (Build succeeded).
+- **Deviation From What Was Requested:** None.
+- **Known Issue / Follow-Up Needed:** None.
+
+
 
 
 
