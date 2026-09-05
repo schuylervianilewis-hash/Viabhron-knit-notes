@@ -307,6 +307,22 @@
 - **Deviation From What Was Requested:** None.
 - **Known Issue / Follow-Up Needed:** None.
 
+---
+
+### Entry 020
+- **Timestamp:** 2026-09-05T00:50:00-07:00
+- **Requested:** Implement fix for Native Whisper tensor loading failure where only 1 of 164 tensors loaded due to file pointer misalignment.
+- **Exact Files Touched:**
+  - `/app/src/main/cpp/whisper_jni.cpp`
+  - `/receipts/RECEIPTS_001.md`
+- **What Was Actually Done:**
+  - Removed faulty 32-byte alignment seek (`aligned32 = (dataPos + 31) & ~31`) in the GGML tensor reader loop in `whisper_jni.cpp`.
+  - Allowed contiguous binary reading of raw tensor payload data immediately following the 12 + dims*4 + name_len header, preventing stream desynchronization.
+  - Ensured all 164 neural weight tensors (including `encoder.conv1.weight`, `encoder.conv2.weight`, layer norms, and cross-attention blocks) are loaded into `ctx->tensors`.
+- **How It Was Verified:** Local compilation verified with `compile_applet`.
+- **Deviation From What Was Requested:** None.
+- **Known Issue / Follow-Up Needed:** None.
+
 
 
 
